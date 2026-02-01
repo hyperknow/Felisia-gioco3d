@@ -1,0 +1,2435 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Il Videogioco 3D di Felisia 👑</title>
+  <style>
+    body{margin:0;overflow:hidden;font-family:system-ui,-apple-system,Segoe UI,Roboto}
+    #hud{
+      position:absolute;left:10px;top:10px;
+      background:rgba(0,0,0,.55);color:#fff;
+      padding:10px 12px;border-radius:12px;
+      max-width:560px;font-size:13px;line-height:1.25;
+      user-select:none
+    }
+    #healthBox{
+      position:absolute;right:10px;top:10px;
+      width:220px;height:18px;border-radius:10px;
+      background:rgba(0,0,0,.35);
+      border:2px solid rgba(255,255,255,.9);
+      overflow:hidden;user-select:none
+    }
+    #healthFill{
+      height:100%;width:100%;
+      background:linear-gradient(to right,#00ff66,#ffee00,#ff2200);
+      border-radius:8px;transition:width .18s ease
+    }
+
+    /* MINI MAPPA */
+    #minimap{
+      position:absolute; left:10px; top:140px;
+      width:220px; height:220px;
+      border-radius:12px;
+      border:2px solid rgba(255,255,255,.9);
+      background:rgba(0,0,0,.35);
+      box-shadow:0 6px 18px rgba(0,0,0,.25);
+    }
+
+    #miniHelp{
+      position:absolute;left:10px;bottom:10px;
+      background:rgba(0,0,0,.40);color:#fff;
+      padding:10px 12px;border-radius:12px;
+      max-width:980px;font-size:12px;line-height:1.25;
+      user-select:none
+    }
+    .k{display:inline-block;min-width:18px;padding:1px 6px;border-radius:8px;
+      background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.22);text-align:center}
+  </style>
+</head>
+<body>
+  <div id="hud">Caricamento...</div>
+  <div id="healthBox"><div id="healthFill"></div></div>
+  <canvas id="minimap"></canvas>
+
+  <div id="miniHelp">
+    🎮 Frecce=cammina • <span class="k">Spazio</span>=salta • <span class="k">S</span>=super salto/scatto •
+    <span class="k">W</span>=voli (molli=resti sospesa) • <span class="k">N</span>=scendi •
+    <span class="k">P</span>=poteri • <span class="k">Z</span>/<span class="k">X</span>=zoom (o rotella mouse) •
+    <span class="k">G</span>=giorno/notte • <span class="k">O</span>=porta castello • <span class="k">Y</span>=siediti/alzati trono • <span class="k">C</span>=cambia vestito •
+    <span class="k">T</span>=trucco (vicino letto) • <span class="k">H</span>=spazzola •
+    <span class="k">M</span>=mappa ON/OFF • <span class="k">R</span>=restart se perdi •
+    🔢 numeri: 4→lvl4, 2 poi 0→lvl20
+  </div>
+
+  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+
+  <script>
+  (() => {
+    const hud = document.getElementById('hud');
+    const healthFill = document.getElementById('healthFill');
+
+    if (typeof THREE === "undefined") {
+      hud.textContent = "Errore: Three.js non si carica. Serve Internet (o la libreria in locale).";
+      return;
+    }
+
+    // ------------------ Audio semplice (beep) ------------------
+    let audioCtx = null;
+    let audioOn = false;
+    function unlockAudio() {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        audioOn = true;
+      } catch(e) {}
+    }
+    window.addEventListener("pointerdown", unlockAudio, {passive:true});
+    window.addEventListener("keydown", unlockAudio);
+
+    function beep(freq=880, dur=0.10, type="triangle", vol=0.06) {
+      if (!audioOn || !audioCtx) return;
+      const t0 = audioCtx.currentTime;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type; o.frequency.setValueAtTime(freq, t0);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(vol, t0+0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0); o.stop(t0+dur+0.02);
+    }
+    const sndStar = () => { beep(880,0.10,"triangle",0.08); setTimeout(()=>beep(1320,0.12,"triangle",0.07),70); };
+    const sndCake = () => { beep(523.25,0.09,"sine",0.08); setTimeout(()=>beep(659.25,0.12,"sine",0.07),80); };
+    const sndHit  = () => { beep(220,0.12,"sawtooth",0.07); };
+    const sndWin  = () => { beep(660,0.10,"triangle",0.07); setTimeout(()=>beep(990,0.14,"triangle",0.08),90); setTimeout(()=>beep(1320,0.16,"triangle",0.08),180); };
+
+    // ------------------ Util ------------------
+    const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+    const rand = (a,b)=>a+Math.random()*(b-a);
+    const dist2 = (ax,az,bx,bz)=>{const dx=ax-bx, dz=az-bz; return dx*dx+dz*dz;};
+
+    // ------------------ Scene ------------------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 2500);
+    const renderer = new THREE.WebGLRenderer({antialias:true});
+    renderer.setPixelRatio(Math.min(2, devicePixelRatio||1));
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.60);
+    scene.add(ambient);
+    const sun = new THREE.DirectionalLight(0xffffff, 1.05);
+    sun.position.set(8, 12, 6);
+    scene.add(sun);
+
+    // ------------------ Stato gioco ------------------
+    const MAX_LEVEL = 20;
+    const UNDERWATER = new Set([3,5,6]);
+
+    let level = 1;
+    let worldSize = 320;
+
+    let isNight = false;
+    let levelSky = 0x87ceeb;
+    let fogEnabled = false;
+
+    const LIVES_MAX = 3;
+    let lives = LIVES_MAX;
+    let gameOver = false;
+    let winState = false;
+
+    let starsNeed = 0;
+    let starsGot = 0;
+
+    // buffer livelli (per 20: premi 2 poi 0)
+    let lvlBuf = "";
+    let lvlBufTime = 0;
+
+    // ------------------ Gruppi mondo ------------------
+    const world = new THREE.Group();
+    scene.add(world);
+
+    const fxGroup = new THREE.Group();
+    scene.add(fxGroup);
+
+    // ------------------ Player (Felisia) ------------------
+    const player = new THREE.Group();
+    scene.add(player);
+
+    function makePrincess() {
+      player.clear();
+
+      const skin = new THREE.MeshStandardMaterial({color:0xffe0bd});
+      const hair = new THREE.MeshStandardMaterial({color:0x7a3b17, emissive:0x2a1307, emissiveIntensity:0.15});
+      const dress = new THREE.MeshStandardMaterial({color:0xff00aa, emissive:0xff00aa, emissiveIntensity:0.08});
+      const shoes = new THREE.MeshStandardMaterial({color:0x111111});
+
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.85,1.05,0.45), dress);
+      body.position.y = 1.12; player.add(body);
+
+      const skirt = new THREE.Mesh(new THREE.CylinderGeometry(0.48,0.90,0.45,18), dress);
+      skirt.position.y = 0.72; player.add(skirt);
+
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.72,0.72,0.72), skin);
+      head.position.y = 1.95; player.add(head);
+
+      const eyeMat = new THREE.MeshStandardMaterial({color:0x000000});
+      const eyeG = new THREE.SphereGeometry(0.055,10,10);
+      const eL = new THREE.Mesh(eyeG, eyeMat); eL.position.set(-0.20,2.05,0.36);
+      const eR = eL.clone(); eR.position.x = 0.20;
+      player.add(eL,eR);
+
+      const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.16,0.03,10,18,Math.PI), eyeMat);
+      mouth.rotation.x = Math.PI/2; mouth.position.set(0,1.83,0.34);
+      player.add(mouth);
+
+      // capelli
+      const hairTop = new THREE.Mesh(new THREE.BoxGeometry(0.88,0.40,0.88), hair);
+      hairTop.position.set(0,2.25,0); player.add(hairTop);
+
+      const hairBack = new THREE.Mesh(new THREE.BoxGeometry(0.82,1.05,0.26), hair);
+      hairBack.position.set(0,1.80,-0.36); player.add(hairBack);
+
+      const armG = new THREE.BoxGeometry(0.22,0.85,0.22);
+      const aL = new THREE.Mesh(armG, skin); aL.position.set(-0.62,1.18,0);
+      const aR = aL.clone(); aR.position.x = 0.62;
+      player.add(aL,aR);
+
+      const legG = new THREE.BoxGeometry(0.26,0.95,0.26);
+      const lL = new THREE.Mesh(legG, shoes); lL.position.set(-0.25,0.25,0);
+      const lR = lL.clone(); lR.position.x = 0.25;
+      player.add(lL,lR);
+
+      // corona decorata
+      const crown = new THREE.Group();
+      const gold = new THREE.MeshStandardMaterial({color:0xffd700, emissive:0xffd700, emissiveIntensity:0.75});
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.46,0.06,10,20), gold);
+      ring.rotation.x = Math.PI/2;
+      crown.add(ring);
+
+      const spikeG = new THREE.ConeGeometry(0.10,0.35,10);
+      for (let i=0;i<6;i++){
+        const a = i/6*Math.PI*2;
+        const sp = new THREE.Mesh(spikeG, gold);
+        sp.position.set(Math.cos(a)*0.46,0.20,Math.sin(a)*0.46);
+        crown.add(sp);
+      }
+      const gems = [0xff0000,0x00ff00,0x00ffff,0xff69b4,0x39ff14,0x0000ff];
+      const gemG = new THREE.SphereGeometry(0.06,10,10);
+      for (let i=0;i<6;i++){
+        const a = i/6*Math.PI*2;
+        const c = gems[i%gems.length];
+        const gm = new THREE.Mesh(gemG, new THREE.MeshStandardMaterial({color:c, emissive:c, emissiveIntensity:1.0}));
+        gm.position.set(Math.cos(a)*0.32,0.06,Math.sin(a)*0.32);
+        crown.add(gm);
+      }
+      crown.position.set(0,2.30,0);
+      player.add(crown);
+
+      // ali vere (visibili solo quando voli)
+      const wings = new THREE.Group();
+      const wingMat = new THREE.MeshStandardMaterial({color:0xffffff, transparent:true, opacity:0.92, side:THREE.DoubleSide});
+      function wing(sign){
+        const s = new THREE.Shape();
+        s.moveTo(0,0);
+        s.bezierCurveTo(0.6,0.2, 1.6,0.2, 2.3,0.45);
+        s.bezierCurveTo(3.0,0.7, 3.0,1.3, 2.4,1.95);
+        s.bezierCurveTo(1.9,2.5, 1.1,2.9, 0.35,2.65);
+        s.bezierCurveTo(0.1,2.45, -0.1,2.1, 0,1.6);
+        s.closePath();
+        const g = new THREE.ShapeGeometry(s);
+        const m = new THREE.Mesh(g, wingMat);
+        m.position.set(0.50*sign,1.92,-0.10);
+        m.rotation.set(0, sign<0?Math.PI:0, sign<0?0.35:-0.35);
+        m.scale.set(sign,1,1);
+        return m;
+      }
+      wings.add(wing(-1), wing(1));
+      wings.visible = false;
+      wings.name = "wings";
+      player.add(wings);
+
+      // trucco
+      const makeup = new THREE.Group();
+      const blushMat = new THREE.MeshStandardMaterial({color:0xff69b4, emissive:0xff69b4, emissiveIntensity:0.9, side:THREE.DoubleSide});
+      const blushG = new THREE.CircleGeometry(0.12,18);
+      const bL = new THREE.Mesh(blushG, blushMat); bL.position.set(-0.24,1.86,0.38);
+      const bR = bL.clone(); bR.position.x = 0.24;
+      makeup.add(bL,bR);
+
+      const shadowMat = new THREE.MeshStandardMaterial({color:0x39ff14, emissive:0x39ff14, emissiveIntensity:1.2});
+      const shG = new THREE.BoxGeometry(0.26,0.06,0.01);
+      const sL = new THREE.Mesh(shG, shadowMat); sL.position.set(-0.18,2.07,0.37);
+      const sR = sL.clone(); sR.position.x = 0.18;
+      makeup.add(sL,sR);
+
+      const lipMat = new THREE.MeshStandardMaterial({color:0xff00aa, emissive:0xff00aa, emissiveIntensity:1.0});
+      const lips = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.06,0.01), lipMat);
+      lips.position.set(0,1.76,0.37);
+      makeup.add(lips);
+
+      makeup.visible = false;
+      makeup.name = "makeup";
+      player.add(makeup);
+
+      // spazzola
+      const brush = new THREE.Group();
+      const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.05,0.60,10), new THREE.MeshStandardMaterial({color:0x8b4513}));
+      handle.rotation.z = Math.PI/2;
+      brush.add(handle);
+      const headB = new THREE.Mesh(new THREE.BoxGeometry(0.30,0.16,0.10), new THREE.MeshStandardMaterial({color:0xdddddd}));
+      headB.position.set(0.30,0,0);
+      brush.add(headB);
+      brush.position.set(0.42,2.00,0.35);
+      brush.visible = false;
+      brush.name = "brush";
+      player.add(brush);
+
+      player.userData._hairMat = hair;
+      player.userData._dressMat = dress;
+    }
+    makePrincess();
+
+    // ------------------ Movimento / Camera ------------------
+    const keys = {ArrowUp:false,ArrowDown:false,ArrowLeft:false,ArrowRight:false};
+    let camDist = 30;
+    let camHeight = 20;
+
+    let velY = 0;
+    let jumping = false;
+
+    let flightMode = "ground"; // ground | ascend | hover | descend
+    let dashCooldown = 0;
+
+    // ------------------ Oggetti mondo ------------------
+    let ground = null;
+    let lava = null;
+    let lavaMat = null;
+
+    // ponte arco lava
+    const bridge = {group:null, cx:0, cz:0, halfL:0, halfW:0, baseH:0.25, archH:3.4, th:0.42};
+    function bridgeHeightAt(x,z){
+      if(!bridge.group) return null;
+      if(Math.abs(z-bridge.cz) > bridge.halfW) return null;
+      if(Math.abs(x-bridge.cx) > bridge.halfL) return null;
+      const xLocal = x - bridge.cx;
+      const norm = xLocal / bridge.halfL;
+      const y = bridge.baseH + bridge.archH*(1 - norm*norm);
+      return y + bridge.th/2;
+    }
+
+    // altro ponte (non lava)
+    let bridge2 = null;
+
+    // castello
+    let castle = null;
+    let castleDoor = null;
+    let castleDoorOpen = false;
+    let bedPos = new THREE.Vector3();
+    let thronePos = new THREE.Vector3(9999,9999,9999);
+    let sitting = false;
+    let sitMode = "none"; // none | bed | throne
+
+    // cambio vestito
+    const dressVariants = [
+      {name:"Fucsia", color:0xff00aa},
+      {name:"Rosa", color:0xff69b4},
+      {name:"Verde fosforescente", color:0x39ff14},
+      {name:"Azzurro", color:0x00ffd5},
+      {name:"Oro", color:0xffd700}
+    ];
+    let dressIndex = 0;
+
+    // farfalle
+    const butterflies = [];
+
+    // maggiordomi + palette
+    const butlers = [];
+    let paletteObj = null;
+    let paletteDelivery = {active:false, t:0};
+
+    // stelline / torta / portale
+    const stars = [];
+    let bigStar = null;
+    let cake = null;
+    let portal = null;
+    let portalActive = false;
+
+    // drago
+    let dragon = null;
+    let dragonAlive = false;
+    let dragonHP = 0;
+    const flames = [];
+    let flameCooldown = 0;
+
+    // mare: pesci e squali
+    const fishies = [];
+    const sharks = [];
+    let buddyFish = null;
+
+    // cane
+    let dog = null;
+
+    // KAKI
+    const kakiTrees = [];
+
+    // FX
+    const particles = [];
+
+    // ------------------ MINI MAPPA ------------------
+    const minimap = document.getElementById("minimap");
+    const mmCtx = minimap.getContext("2d");
+    let mapVisible = true;
+
+    function setupMinimap(){
+      const size = 220;
+      minimap.style.width = size + "px";
+      minimap.style.height = size + "px";
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      minimap.width = Math.floor(size * dpr);
+      minimap.height = Math.floor(size * dpr);
+      mmCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    setupMinimap();
+    addEventListener("resize", setupMinimap);
+
+    function w2m(x, z, size, scale){
+      const cx = size/2;
+      const cz = size/2;
+      return { mx: cx + x*scale, mz: cz + z*scale };
+    }
+    function drawDot(x, z, r, color, size, scale){
+      const p = w2m(x,z,size,scale);
+      mmCtx.beginPath();
+      mmCtx.fillStyle = color;
+      mmCtx.arc(p.mx, p.mz, r, 0, Math.PI*2);
+      mmCtx.fill();
+    }
+    function drawMinimap(){
+      if (!mapVisible) return;
+
+      const size = 220;
+      mmCtx.clearRect(0,0,size,size);
+
+      mmCtx.fillStyle = "rgba(0,0,0,0.25)";
+      mmCtx.fillRect(0,0,size,size);
+
+      mmCtx.strokeStyle = "rgba(255,255,255,0.85)";
+      mmCtx.lineWidth = 2;
+      mmCtx.strokeRect(6,6,size-12,size-12);
+
+      const scale = (size-20) / worldSize;
+
+      // lava
+      if (lava && lava.geometry && lava.geometry.parameters){
+        const w = lava.geometry.parameters.width;
+        const h = lava.geometry.parameters.height;
+        const p1 = w2m(lava.position.x - w/2, lava.position.z - h/2, size, scale);
+        const p2 = w2m(lava.position.x + w/2, lava.position.z + h/2, size, scale);
+        mmCtx.fillStyle = "rgba(255,80,0,0.75)";
+        mmCtx.fillRect(p1.mx, p1.mz, (p2.mx-p1.mx), (p2.mz-p1.mz));
+      }
+
+      // ponte arco
+      if (bridge && bridge.group){
+        const a = w2m(bridge.cx - bridge.halfL, bridge.cz, size, scale);
+        const b = w2m(bridge.cx + bridge.halfL, bridge.cz, size, scale);
+        mmCtx.strokeStyle = "rgba(160,90,40,0.95)";
+        mmCtx.lineWidth = 4;
+        mmCtx.beginPath();
+        mmCtx.moveTo(a.mx, a.mz);
+        mmCtx.lineTo(b.mx, b.mz);
+        mmCtx.stroke();
+      }
+
+      // ponte 2
+      if (bridge2 && bridge2.children && bridge2.children.length >= 2){
+        const first = bridge2.children[0].position;
+        const last  = bridge2.children[bridge2.children.length-1].position;
+        const a = w2m(first.x, first.z, size, scale);
+        const b = w2m(last.x,  last.z,  size, scale);
+        mmCtx.strokeStyle = "rgba(120,70,35,0.95)";
+        mmCtx.lineWidth = 4;
+        mmCtx.beginPath();
+        mmCtx.moveTo(a.mx, a.mz);
+        mmCtx.lineTo(b.mx, b.mz);
+        mmCtx.stroke();
+      }
+
+      // castello
+      if (castle){
+        const p = w2m(castle.position.x, castle.position.z, size, scale);
+        mmCtx.fillStyle = "rgba(200,200,200,0.85)";
+        mmCtx.fillRect(p.mx-6, p.mz-6, 12, 12);
+      }
+
+      // stelline
+      if (stars && stars.length){
+        for (const s of stars){
+          drawDot(s.position.x, s.position.z, 2.2, "rgba(255,255,0,0.95)", size, scale);
+        }
+      }
+      // stellina gigante
+      if (bigStar){
+        drawDot(bigStar.position.x, bigStar.position.z, 4.6, "rgba(255,240,80,1)", size, scale);
+      }
+      // torta
+      if (cake){
+        drawDot(cake.position.x, cake.position.z, 3.2, "rgba(255,80,180,0.95)", size, scale);
+      }
+      // portale
+      if (portalActive && portal){
+        drawDot(portal.position.x, portal.position.z, 5.0, "rgba(0,255,255,0.95)", size, scale);
+        drawDot(portal.position.x, portal.position.z, 2.0, "rgba(0,0,0,0.6)", size, scale);
+      }
+      // drago
+      if (dragonAlive && dragon){
+        drawDot(dragon.position.x, dragon.position.z, 5.0, "rgba(40,255,40,0.95)", size, scale);
+        drawDot(dragon.position.x, dragon.position.z, 2.5, "rgba(255,40,40,0.95)", size, scale);
+      }
+      // squali (puntini grigi)
+      if (sharks && sharks.length){
+        for (const sh of sharks){
+          drawDot(sh.position.x, sh.position.z, 2.4, "rgba(180,180,180,0.95)", size, scale);
+        }
+      }
+      // cane
+      if (dog){
+        drawDot(dog.position.x, dog.position.z, 3.2, "rgba(0,255,210,0.95)", size, scale);
+      }
+      // TU
+      drawDot(player.position.x, player.position.z, 4.2, "rgba(255,0,170,1)", size, scale);
+    }
+
+    // ------------------ Forme ------------------
+    function createStarMesh(scale=1){
+      const shape = new THREE.Shape();
+      const outer = 0.5*scale;
+      const inner = 0.2*scale;
+      for(let i=0;i<10;i++){
+        const a = i/10*Math.PI*2;
+        const r = (i%2===0)?outer:inner;
+        const x = Math.cos(a)*r;
+        const y = Math.sin(a)*r;
+        if(i===0) shape.moveTo(x,y); else shape.lineTo(x,y);
+      }
+      shape.closePath();
+      const geo = new THREE.ExtrudeGeometry(shape, {depth:0.2*scale, bevelEnabled:false});
+      const mat = new THREE.MeshStandardMaterial({color:0xffff00, emissive:0xffd700, emissiveIntensity:0.7});
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.x = -Math.PI/2;
+      mesh.userData.spin = rand(0.015,0.03);
+      return mesh;
+    }
+
+    function createCakeSlice(){
+      const g = new THREE.Group();
+      const plate = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.9,0.9,0.08,26),
+        new THREE.MeshStandardMaterial({color:0xffffff, roughness:0.8})
+      );
+      plate.position.y = 0.04; g.add(plate);
+
+      const cakeMat = new THREE.MeshStandardMaterial({color:0xffc7d9, roughness:0.65});
+      const wedge = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.75,0.75,0.55,28,1,false,0.25,1.0),
+        cakeMat
+      );
+      wedge.rotation.x = Math.PI/2;
+      wedge.position.y = 0.36; g.add(wedge);
+
+      const icing = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.77,0.77,0.18,28,1,false,0.25,1.0),
+        new THREE.MeshStandardMaterial({color:0xff00aa, emissive:0xff00aa, emissiveIntensity:0.35})
+      );
+      icing.rotation.x = Math.PI/2;
+      icing.position.y = 0.62; g.add(icing);
+
+      const cherry = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12,16,16),
+        new THREE.MeshStandardMaterial({color:0xff0000, emissive:0xff0000, emissiveIntensity:0.25})
+      );
+      cherry.position.set(0.15,0.85,0.1);
+      g.add(cherry);
+
+      g.userData.spin = rand(0.01,0.03);
+      return g;
+    }
+
+    function createPortal(){
+      const g = new THREE.Group();
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(1.25,0.22,16,40),
+        new THREE.MeshStandardMaterial({color:0x00ffff, emissive:0x00ffff, emissiveIntensity:1.6})
+      );
+      ring.rotation.y = Math.PI/2;
+      ring.position.y = 1.35;
+      g.add(ring);
+
+      const base = new THREE.Mesh(
+        new THREE.CircleGeometry(1.55,40),
+        new THREE.MeshStandardMaterial({color:0x551a8b, emissive:0x551a8b, emissiveIntensity:0.85})
+      );
+      base.rotation.x = -Math.PI/2;
+      base.position.y = 0.02;
+      g.add(base);
+
+      g.userData.t = 0;
+      return g;
+    }
+
+    function makeStripedFishTexture(){
+      const c = document.createElement("canvas");
+      c.width = 256; c.height = 128;
+      const ctx = c.getContext("2d");
+
+      ctx.fillStyle = "#ff8c1a";
+      ctx.fillRect(0,0,c.width,c.height);
+
+      for(let x=0; x<c.width; x+=18){
+        ctx.fillStyle = "#000000";
+        ctx.fillRect(x,0,5,c.height);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(x+6,0,4,c.height);
+      }
+
+      const grad = ctx.createLinearGradient(0,0,0,c.height);
+      grad.addColorStop(0,"rgba(255,255,255,0.18)");
+      grad.addColorStop(1,"rgba(0,0,0,0.12)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0,0,c.width,c.height);
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(1,1);
+      return tex;
+    }
+
+    function createFish(color=0xffaa00, texture=null){
+      const g = new THREE.Group();
+      const mat = texture
+        ? new THREE.MeshStandardMaterial({map:texture})
+        : new THREE.MeshStandardMaterial({color, roughness:0.55});
+
+      const body = new THREE.Mesh(new THREE.SphereGeometry(0.55,16,16), mat);
+      body.scale.set(1.3,0.8,0.8);
+      g.add(body);
+
+      const nose = new THREE.Mesh(new THREE.ConeGeometry(0.25,0.35,14), mat);
+      nose.rotation.z = Math.PI/2;
+      nose.position.x = 0.85;
+      g.add(nose);
+
+      const tail = new THREE.Mesh(new THREE.ConeGeometry(0.35,0.55,14), mat);
+      tail.rotation.z = -Math.PI/2;
+      tail.position.x = -0.95;
+      tail.scale.y = 1.2;
+      g.add(tail);
+
+      const fin = new THREE.Mesh(new THREE.ConeGeometry(0.18,0.32,12), mat);
+      fin.rotation.x = Math.PI;
+      fin.position.set(0.1,0.35,0);
+      g.add(fin);
+
+      g.userData.phase = Math.random()*Math.PI*2;
+      return g;
+    }
+
+    function createShark(){
+      const g = new THREE.Group();
+      const mat = new THREE.MeshStandardMaterial({color:0x8aa0ad, roughness:0.65});
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.55,1.2,8,18), mat);
+      body.rotation.z = Math.PI/2;
+      g.add(body);
+
+      const fin = new THREE.Mesh(new THREE.ConeGeometry(0.22,0.55,10), mat);
+      fin.position.set(0.0,0.55,0);
+      fin.rotation.x = Math.PI;
+      g.add(fin);
+
+      const tail = new THREE.Mesh(new THREE.ConeGeometry(0.35,0.8,12), mat);
+      tail.position.set(-1.2,0,0);
+      tail.rotation.z = -Math.PI/2;
+      g.add(tail);
+
+      const toothMat = new THREE.MeshStandardMaterial({color:0xffffff, emissive:0xffffff, emissiveIntensity:0.15});
+      for(let i=0;i<6;i++){
+        const t = new THREE.Mesh(new THREE.ConeGeometry(0.06,0.18,10), toothMat);
+        t.position.set(1.25, -0.15, -0.18 + i*0.07);
+        t.rotation.x = Math.PI;
+        g.add(t);
+      }
+
+      g.userData.target = new THREE.Vector3(rand(-20,20), 0, rand(-20,20));
+      g.userData.speed = rand(0.04,0.07);
+      g.userData.phase = Math.random()*Math.PI*2;
+      return g;
+    }
+
+    // ------------------ KAKI TREE (frutti visibili) ------------------
+    function createKakiTree(x,z){
+      const g = new THREE.Group();
+
+      const trunk = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.28,0.42,2.4,10),
+        new THREE.MeshStandardMaterial({ color:0x6b3f1f })
+      );
+      trunk.position.y = 1.2; g.add(trunk);
+
+      const leaves = new THREE.Mesh(
+        new THREE.SphereGeometry(1.05,18,18),
+        new THREE.MeshStandardMaterial({ color:0x2a8a2a })
+      );
+      leaves.position.y = 2.6; g.add(leaves);
+
+      const fruitMat = new THREE.MeshStandardMaterial({
+        color:0xff8800,
+        emissive:0xff8800,
+        emissiveIntensity:0.9
+      });
+
+      for(let i=0;i<18;i++){
+        const f = new THREE.Mesh(new THREE.SphereGeometry(0.18,12,12), fruitMat);
+        const a = Math.random()*Math.PI*2;
+        const r = rand(1.15, 1.35);
+        f.position.set(Math.cos(a)*r, 2.6 + rand(-0.25,0.45), Math.sin(a)*r);
+        g.add(f);
+      }
+
+      const glow = new THREE.PointLight(0xff8800, 1.0, 14);
+      glow.position.set(0, 2.6, 0);
+      g.add(glow);
+
+      g.position.set(x,0,z);
+      return g;
+    }
+    function addKakiTree(obj){
+      world.add(obj);
+      kakiTrees.push(obj);
+    }
+
+    // ------------------ Cane ------------------
+    function createDog(){
+      const dog = new THREE.Group();
+      const fur = new THREE.MeshStandardMaterial({color:0x996633});
+      const body = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.45,1.5), fur);
+      body.position.y = 0.45; dog.add(body);
+
+      const head = new THREE.Mesh(new THREE.BoxGeometry(0.50,0.50,0.50), fur);
+      head.position.set(0,0.75,0.85); dog.add(head);
+
+      const ear = new THREE.Mesh(new THREE.BoxGeometry(0.16,0.28,0.06), fur);
+      ear.position.set(-0.20,0.98,0.75);
+      const ear2 = ear.clone(); ear2.position.x = 0.20;
+      dog.add(ear,ear2);
+
+      const legMat = new THREE.MeshStandardMaterial({color:0x553311});
+      const legG = new THREE.CylinderGeometry(0.09,0.11,0.45,10);
+      [[-0.30,0.22,0.55],[0.30,0.22,0.55],[-0.30,0.22,-0.55],[0.30,0.22,-0.55]].forEach(p=>{
+        const L = new THREE.Mesh(legG, legMat);
+        L.position.set(p[0],p[1],p[2]);
+        dog.add(L);
+      });
+
+      const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.05,0.07,0.65,10), fur);
+      tail.position.set(0,0.75,-0.85); tail.rotation.x = Math.PI/2;
+      dog.add(tail);
+
+      // vestitino verde acqua + fiocco
+      const dressMat = new THREE.MeshStandardMaterial({color:0x00ffd5});
+      const coat = new THREE.Mesh(new THREE.BoxGeometry(1.0,0.48,1.05), dressMat);
+      coat.position.set(0,0.55,0.12); dog.add(coat);
+      const skirt = new THREE.Mesh(new THREE.CylinderGeometry(0.60,0.95,0.32,18), dressMat);
+      skirt.position.set(0,0.38,0.12); dog.add(skirt);
+
+      const bow = new THREE.Group();
+      const b1 = new THREE.Mesh(new THREE.BoxGeometry(0.20,0.13,0.03), dressMat);
+      const b2 = b1.clone();
+      b1.position.x = -0.14; b2.position.x = 0.14;
+      bow.add(b1,b2);
+      bow.add(new THREE.Mesh(new THREE.BoxGeometry(0.09,0.10,0.04), dressMat));
+      bow.position.set(0,1.02,0.48);
+      dog.add(bow);
+
+      dog.userData.barkCd = 0;
+      return dog;
+    }
+
+    // ------------------ Farfalle ------------------
+    function makeButterflyTexture(){
+      const c = document.createElement("canvas");
+      c.width = 128; c.height = 128;
+      const ctx = c.getContext("2d");
+      ctx.clearRect(0,0,128,128);
+
+      // ali con gradiente e pois
+      const g = ctx.createRadialGradient(64,64,10, 64,64,64);
+      g.addColorStop(0, "rgba(255,255,255,0.95)");
+      g.addColorStop(0.35, "rgba(255,105,180,0.85)");
+      g.addColorStop(0.7, "rgba(57,255,20,0.70)");
+      g.addColorStop(1, "rgba(0,255,255,0.0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(64,64,52,38,0,0,Math.PI*2);
+      ctx.fill();
+
+      for(let i=0;i<40;i++){
+        ctx.fillStyle = `rgba(255,255,255,${0.25+Math.random()*0.55})`;
+        ctx.beginPath();
+        ctx.arc(64+rand(-40,40),64+rand(-28,28), rand(1.5,3.5), 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+      return tex;
+    }
+    const butterflyTex = makeButterflyTexture();
+
+    function createButterfly(){
+      const g = new THREE.Group();
+      const bodyMat = new THREE.MeshStandardMaterial({color:0x3b2a1a, roughness:0.9});
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.09,0.38,10), bodyMat);
+      body.rotation.z = Math.PI/2;
+      g.add(body);
+
+      const wingGeo = new THREE.PlaneGeometry(0.70, 0.50);
+      const wingMat = new THREE.MeshStandardMaterial({
+        map: butterflyTex,
+        transparent: true,
+        opacity: 0.95,
+        side: THREE.DoubleSide,
+        emissive: 0xffffff,
+        emissiveIntensity: 0.35
+      });
+
+      const L = new THREE.Mesh(wingGeo, wingMat);
+      const R = new THREE.Mesh(wingGeo, wingMat);
+      L.position.set(-0.28, 0, 0);
+      R.position.set( 0.28, 0, 0);
+      L.rotation.y =  Math.PI/2;
+      R.rotation.y = -Math.PI/2;
+      g.add(L,R);
+
+      g.userData.L = L;
+      g.userData.R = R;
+      g.userData.phase = rand(0, Math.PI*2);
+      g.userData.flap = rand(6.0, 9.5);
+      g.userData.fly = rand(0.8, 1.25);
+      g.userData.target = new THREE.Vector3(0,0,0);
+
+      return g;
+    }
+
+    function addButterflies(){
+      butterflies.length = 0;
+      if (UNDERWATER.has(level)) return;
+
+      const count = 10 + Math.floor(level/2);
+      for(let i=0;i<count;i++){
+        const b = createButterfly();
+
+        let x = rand(-worldSize*0.36, worldSize*0.36);
+        let z = rand(-worldSize*0.36, worldSize*0.36);
+        for(let k=0;k<25;k++){
+          if(!inLava(x,z) && dist2(x,z, -worldSize*0.35, -worldSize*0.35) >= 18*18) break;
+          x = rand(-worldSize*0.36, worldSize*0.36);
+          z = rand(-worldSize*0.36, worldSize*0.36);
+        }
+
+        b.position.set(x, baseYAt(x,z) + rand(3.0, 9.0), z);
+        b.userData.target.set(
+          rand(-worldSize*0.38, worldSize*0.38),
+          baseYAt(x,z) + rand(3.5, 10.0),
+          rand(-worldSize*0.38, worldSize*0.38)
+        );
+
+        world.add(b);
+        butterflies.push(b);
+      }
+    }
+
+    const _bfTo = new THREE.Vector3();
+    const _bfSeg = new THREE.Vector3();
+
+    function updateButterflies(dt){
+      if (!butterflies.length) return;
+      if (UNDERWATER.has(level)) return;
+
+      for (const b of butterflies){
+        b.userData.phase += dt * b.userData.flap;
+
+        const flap = Math.sin(b.userData.phase) * 1.05;
+        if (b.userData.L) b.userData.L.rotation.z = flap;
+        if (b.userData.R) b.userData.R.rotation.z = -flap;
+
+        // volo verso target
+        const t = b.userData.target;
+        _bfTo.copy(t).sub(b.position);
+        const d = _bfTo.length();
+
+        if (d < 1.2){
+          // nuovo target
+          let tx = rand(-worldSize*0.40, worldSize*0.40);
+          let tz = rand(-worldSize*0.40, worldSize*0.40);
+          for(let k=0;k<30;k++){
+            if(!inLava(tx,tz) && dist2(tx,tz, -worldSize*0.35, -worldSize*0.35) >= 18*18) break;
+            tx = rand(-worldSize*0.40, worldSize*0.40);
+            tz = rand(-worldSize*0.40, worldSize*0.40);
+          }
+          t.set(tx, baseYAt(tx,tz) + rand(3.5, 10.0), tz);
+        } else {
+          _bfTo.multiplyScalar(1/d);
+          b.position.addScaledVector(_bfTo, dt * 6.2 * b.userData.fly);
+
+          // mantieni sopra il terreno
+          const gy = baseYAt(b.position.x, b.position.z);
+          b.position.y = Math.max(b.position.y, gy + 2.6);
+
+          // “galleggia” un pochino
+          b.position.y += Math.sin(b.userData.phase*0.65) * dt * 0.65;
+
+          // gira nella direzione
+          b.rotation.y = Math.atan2(_bfTo.x, _bfTo.z);
+        }
+      }
+    }
+
+    // ------------------ Castello / Maggiordomi ------------------
+
+    function createPalette(){
+      const g = new THREE.Group();
+      const base = new THREE.Mesh(new THREE.BoxGeometry(0.72,0.08,0.46), new THREE.MeshStandardMaterial({color:0x222222}));
+      base.position.y = 0.04; g.add(base);
+      const cols = [0xff00aa,0xff69b4,0x39ff14];
+      for(let i=0;i<3;i++){
+        const c = cols[i];
+        const sq = new THREE.Mesh(new THREE.BoxGeometry(0.18,0.03,0.14),
+          new THREE.MeshStandardMaterial({color:c, emissive:c, emissiveIntensity:0.7})
+        );
+        sq.position.set(-0.20 + i*0.20, 0.09, 0);
+        g.add(sq);
+      }
+      return g;
+    }
+
+    function createButler(){
+      const g = new THREE.Group();
+      const suit = new THREE.MeshStandardMaterial({color:0x111111});
+      const white = new THREE.MeshStandardMaterial({color:0xffffff});
+      const skin = new THREE.MeshStandardMaterial({color:0xffe0bd});
+
+      const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55,0.85,0.32), suit);
+      torso.position.y = 1.15; g.add(torso);
+
+      const shirt = new THREE.Mesh(new THREE.BoxGeometry(0.30,0.55,0.33), white);
+      shirt.position.set(0,1.15,0.01); g.add(shirt);
+
+      const headB = new THREE.Mesh(new THREE.BoxGeometry(0.46,0.46,0.46), skin);
+      headB.position.y = 1.85; g.add(headB);
+
+      const armG = new THREE.BoxGeometry(0.16,0.58,0.16);
+      const aL = new THREE.Mesh(armG, suit); aL.position.set(-0.40,1.15,0);
+      const aR = aL.clone(); aR.position.x = 0.40;
+      g.add(aL,aR);
+
+      const legG = new THREE.BoxGeometry(0.18,0.75,0.18);
+      const lL = new THREE.Mesh(legG, suit); lL.position.set(-0.14,0.37,0);
+      const lR = lL.clone(); lR.position.x = 0.14;
+      g.add(lL,lR);
+
+      const bow = new THREE.Group();
+      const bowMat = new THREE.MeshStandardMaterial({color:0xff00aa, emissive:0xff00aa, emissiveIntensity:0.35});
+      const b1 = new THREE.Mesh(new THREE.BoxGeometry(0.12,0.08,0.02), bowMat);
+      const b2 = b1.clone();
+      b1.position.x=-0.08; b2.position.x=0.08;
+      bow.add(b1,b2);
+      bow.add(new THREE.Mesh(new THREE.BoxGeometry(0.05,0.06,0.03), white));
+      bow.position.set(0,1.55,0.18);
+      g.add(bow);
+
+      g.userData.home = new THREE.Vector3();
+      g.userData.phase = Math.random()*Math.PI*2;
+      return g;
+    }
+
+    function createCastle(){
+      const castle = new THREE.Group();
+
+      const wallMat = new THREE.MeshStandardMaterial({color:0xc0c0c0, roughness:0.8});
+      const roofMat = new THREE.MeshStandardMaterial({color:0xb0b0b0, roughness:0.9, transparent:true, opacity:0.55}); // coperto (inverno!)
+
+      const L = 14;
+      const floor = new THREE.Mesh(new THREE.BoxGeometry(L,0.5,L), wallMat);
+      floor.position.y = 0.25; castle.add(floor);
+
+      const wallH = 4.2;
+      const t = 0.5;
+
+      const left  = new THREE.Mesh(new THREE.BoxGeometry(t,wallH,L), wallMat);  left.position.set(-L/2,wallH/2+0.25,0);
+      const right = left.clone(); right.position.x = L/2;
+      const back  = new THREE.Mesh(new THREE.BoxGeometry(L,wallH,t), wallMat);  back.position.set(0,wallH/2+0.25,-L/2);
+
+      castle.add(left,right,back);
+
+      const doorW = 3.0;
+      const segLen = (L - doorW)/2;
+      const fL = new THREE.Mesh(new THREE.BoxGeometry(segLen,wallH,t), wallMat);
+      fL.position.set(-(segLen/2+doorW/2), wallH/2+0.25, L/2);
+      const fR = fL.clone(); fR.position.x = (segLen/2+doorW/2);
+      castle.add(fL,fR);
+
+      castleDoor = new THREE.Mesh(new THREE.BoxGeometry(2.3,3.2,0.35), new THREE.MeshStandardMaterial({color:0x654321}));
+      castleDoor.position.set(0,1.75,L/2+0.06);
+      castle.add(castleDoor);
+
+      // tetto
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(L,0.45,L), roofMat);
+      roof.position.set(0,wallH+0.70,0);
+      castle.add(roof);
+
+      // torri solo agli angoli (non in mezzo!)
+      const towerMat = new THREE.MeshStandardMaterial({color:0xb8b8b8, roughness:0.85});
+      const towerGeo = new THREE.CylinderGeometry(1.35,1.35,7.0,18);
+      const corners = [[-L/2,3.75,-L/2],[L/2,3.75,-L/2],[-L/2,3.75,L/2],[L/2,3.75,L/2]];
+      corners.forEach(p=>{
+        const tw = new THREE.Mesh(towerGeo, towerMat);
+        tw.position.set(p[0],p[1],p[2]);
+        castle.add(tw);
+        const roofC = new THREE.Mesh(new THREE.ConeGeometry(1.8,3.2,18), new THREE.MeshStandardMaterial({color:0x8b0000}));
+        roofC.position.set(p[0],p[1]+5.05,p[2]);
+        castle.add(roofC);
+      });
+
+      // letto (ben visibile)
+      const bed = new THREE.Group();
+      const wood = new THREE.MeshStandardMaterial({color:0x8b4513});
+      const frame = new THREE.Mesh(new THREE.BoxGeometry(3.4,0.4,1.6), wood);
+      frame.position.y = 0.6; bed.add(frame);
+      const mattress = new THREE.Mesh(new THREE.BoxGeometry(3.2,0.3,1.5), new THREE.MeshStandardMaterial({color:0xffffff}));
+      mattress.position.y = 0.85; bed.add(mattress);
+      const blanket = new THREE.Mesh(new THREE.BoxGeometry(3.2,0.15,1.05), new THREE.MeshStandardMaterial({color:0xff00aa}));
+      blanket.position.set(0,0.95,0.18); bed.add(blanket);
+      const pillow = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.2,0.5), new THREE.MeshStandardMaterial({color:0xffffe0}));
+      pillow.position.set(1.2,1.0,-0.35); bed.add(pillow);
+
+      bed.position.set(3.0,0,-3.0);
+      bed.name = "bed";
+      castle.add(bed);
+
+      const warm = new THREE.PointLight(0xffe0b3, 1.25, 55);
+      warm.position.set(0,3.7,0);
+      castle.add(warm);
+
+      // 5 maggiordomi
+      butlers.length = 0;
+      for(let i=0;i<5;i++){
+        const b = createButler();
+        b.position.set(-4.2 + i*2.1, 0, -0.6 + (i%2)*1.4);
+        b.userData.home.copy(b.position);
+        castle.add(b);
+        butlers.push(b);
+      }
+      paletteObj = createPalette();
+      paletteObj.position.set(0.0, 1.15, 0.50);
+      butlers[0].add(paletteObj);
+
+      // trono (per sederti)
+      const throne = new THREE.Group();
+      const goldMat = new THREE.MeshStandardMaterial({color:0xffd700, emissive:0xffd700, emissiveIntensity:0.25, roughness:0.55, metalness:0.7});
+      const redVelvet = new THREE.MeshStandardMaterial({color:0xaa0033, emissive:0xaa0033, emissiveIntensity:0.18, roughness:0.75});
+
+      const baseT = new THREE.Mesh(new THREE.BoxGeometry(2.8,0.35,2.2), goldMat);
+      baseT.position.y = 0.35; throne.add(baseT);
+
+      const seat = new THREE.Mesh(new THREE.BoxGeometry(2.2,0.35,1.6), redVelvet);
+      seat.position.y = 0.70; throne.add(seat);
+
+      const cushion = new THREE.Mesh(new THREE.BoxGeometry(2.0,0.18,1.4), new THREE.MeshStandardMaterial({color:0xff00aa, emissive:0xff00aa, emissiveIntensity:0.18, roughness:0.8}));
+      cushion.position.set(0,0.88,0.05); throne.add(cushion);
+
+      const back2 = new THREE.Mesh(new THREE.BoxGeometry(2.2,2.2,0.35), goldMat);
+      back.position.set(0,1.75,-0.75); throne.add(back2);
+
+      const armG = new THREE.BoxGeometry(0.35,0.65,1.6);
+      const aL = new THREE.Mesh(armG, goldMat); aL.position.set(-1.25,0.95,0);
+      const aR = aL.clone(); aR.position.x = 1.25;
+      throne.add(aL,aR);
+
+      // decorazione brillante
+      const orbMat = new THREE.MeshStandardMaterial({color:0x00ffff, emissive:0x00ffff, emissiveIntensity:1.0});
+      const orb = new THREE.Mesh(new THREE.SphereGeometry(0.18,12,12), orbMat);
+      orb.position.set(0,2.75,-0.75);
+      throne.add(orb);
+
+      throne.position.set(-2.8,0,-2.2);
+      throne.name = "throne";
+      castle.add(throne);
+
+      return castle;
+    }
+
+    // ------------------ Drago + fiamme ------------------
+    function createDragon(){
+      const g = new THREE.Group();
+
+      const green = new THREE.MeshStandardMaterial({color:0x1aa31a, emissive:0x0a4a0a, emissiveIntensity:0.25, roughness:0.6});
+      const red   = new THREE.MeshStandardMaterial({color:0xdd2222, emissive:0x6a0000, emissiveIntensity:0.25, roughness:0.6});
+      const dark  = new THREE.MeshStandardMaterial({color:0x222222, roughness:0.85});
+
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.85,2.4,8,18), green);
+      body.rotation.z = Math.PI/2;
+      g.add(body);
+
+      const belly = new THREE.Mesh(new THREE.CapsuleGeometry(0.55,2.0,8,16), red);
+      belly.rotation.z = Math.PI/2;
+      belly.position.y = -0.18;
+      g.add(belly);
+
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.70,18,18), green);
+      head.position.set(2.1,0.25,0);
+      g.add(head);
+
+      const snout = new THREE.Mesh(new THREE.ConeGeometry(0.35,0.9,16), green);
+      snout.rotation.z = -Math.PI/2;
+      snout.position.set(2.85,0.20,0);
+      g.add(snout);
+
+      const eyeMat = new THREE.MeshStandardMaterial({color:0xffffff, emissive:0xffffff, emissiveIntensity:0.2});
+      const pupil  = new THREE.MeshStandardMaterial({color:0x000000});
+      const eG = new THREE.SphereGeometry(0.10,10,10);
+      const pG = new THREE.SphereGeometry(0.05,10,10);
+      const e1 = new THREE.Mesh(eG, eyeMat); e1.position.set(2.25,0.48,0.40);
+      const e2 = e1.clone(); e2.position.z = -0.40;
+      const p1 = new THREE.Mesh(pG, pupil); p1.position.set(2.32,0.48,0.47);
+      const p2 = p1.clone(); p2.position.z = -0.47;
+      g.add(e1,e2,p1,p2);
+
+      const hornMat = new THREE.MeshStandardMaterial({color:0xffd700, emissive:0xffd700, emissiveIntensity:0.4});
+      const hornG = new THREE.ConeGeometry(0.14,0.55,10);
+      const h1 = new THREE.Mesh(hornG, hornMat); h1.position.set(1.95,0.90,0.45);
+      const h2 = h1.clone(); h2.position.z = -0.45;
+      h1.rotation.x = 0.35; h2.rotation.x = -0.35;
+      g.add(h1,h2);
+
+      const wingMat = new THREE.MeshStandardMaterial({color:0x1aa31a, transparent:true, opacity:0.9, side:THREE.DoubleSide});
+      function dragonWing(sign){
+        const s = new THREE.Shape();
+        s.moveTo(0,0);
+        s.bezierCurveTo(1.2,0.2, 2.6,0.4, 3.4,0.9);
+        s.bezierCurveTo(4.2,1.4, 3.7,2.2, 2.8,2.6);
+        s.bezierCurveTo(2.0,3.0, 0.9,3.0, 0.2,2.4);
+        s.bezierCurveTo(-0.1,2.1, -0.1,1.0, 0,0);
+        s.closePath();
+        const geo = new THREE.ShapeGeometry(s);
+        const m = new THREE.Mesh(geo, wingMat);
+        m.position.set(0.2,0.55,0.95*sign);
+        m.rotation.y = sign>0 ? -0.9 : 0.9;
+        m.scale.set(1,1,sign);
+        return m;
+      }
+      g.add(dragonWing(1), dragonWing(-1));
+
+      const tail = new THREE.Mesh(new THREE.ConeGeometry(0.35,2.2,16), green);
+      tail.rotation.z = Math.PI/2;
+      tail.position.set(-2.4,0.05,0);
+      g.add(tail);
+
+      const legG = new THREE.CylinderGeometry(0.18,0.22,0.9,10);
+      [[-0.6,-0.8,0.55],[0.8,-0.8,0.55],[-0.6,-0.8,-0.55],[0.8,-0.8,-0.55]].forEach(p=>{
+        const L = new THREE.Mesh(legG, dark);
+        L.position.set(p[0],p[1],p[2]);
+        g.add(L);
+      });
+
+      g.userData.time = 0;
+      return g;
+    }
+
+    function spawnFlame(from, dir){
+      const g = new THREE.Group();
+
+      const mat = new THREE.MeshStandardMaterial({
+        color:0xff7a00,
+        emissive:0xff3b00,
+        emissiveIntensity:1.6,
+        transparent:true,
+        opacity:0.95
+      });
+
+      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.28,0.85,14), mat);
+      flame.rotation.x = Math.PI/2;
+      g.add(flame);
+
+      const glow = new THREE.PointLight(0xff4a00, 1.4, 12);
+      glow.position.set(0,0,0.25);
+      g.add(glow);
+
+      g.position.copy(from);
+
+      // ✅ velocità in "unità al secondo" (non per frame)
+      g.userData.vel = dir.clone().multiplyScalar(18);
+
+      // ✅ raggio di collisione (più grande = più facile colpirti)
+      g.userData.radius = 1.8;
+
+      // ✅ per controllare il percorso (anti “salto”)
+      g.userData.prev = from.clone();
+
+      g.userData.life = 3.2;
+
+      fxGroup.add(g);
+      flames.push(g);
+    }
+
+    function spawnSparkle(x,y,z, count=10){
+      for(let i=0;i<count;i++){
+        const cols = [0xff00aa,0xff69b4,0x39ff14,0xffff00,0x00ffff];
+        const col = cols[(Math.random()*cols.length)|0];
+        const p = new THREE.Mesh(
+          new THREE.SphereGeometry(0.05,10,10),
+          new THREE.MeshStandardMaterial({color:col, emissive:col, emissiveIntensity:1.2, transparent:true, opacity:0.9})
+        );
+        p.position.set(x+rand(-0.5,0.5), y+rand(-0.2,0.8), z+rand(-0.5,0.5));
+        p.userData.vel = new THREE.Vector3(rand(-0.04,0.04), rand(0.02,0.08), rand(-0.04,0.04));
+        p.userData.life = rand(0.6,1.4);
+        fxGroup.add(p);
+        particles.push(p);
+      }
+    }
+
+    // ---------- POTERI ARCOBALENO ----------
+    function makeRainbowTexture(){
+      const c = document.createElement("canvas");
+      c.width = 512; c.height = 64;
+      const ctx = c.getContext("2d");
+      const g = ctx.createLinearGradient(0,0,c.width,0);
+      g.addColorStop(0.00, "#ff0000");
+      g.addColorStop(0.16, "#ff7a00");
+      g.addColorStop(0.33, "#ffee00");
+      g.addColorStop(0.50, "#00ff00");
+      g.addColorStop(0.66, "#00ffff");
+      g.addColorStop(0.83, "#0000ff");
+      g.addColorStop(1.00, "#ff00ff");
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,c.width,c.height);
+
+      // un po' di brillini sopra
+      for(let i=0;i<120;i++){
+        ctx.fillStyle = `rgba(255,255,255,${Math.random()*0.45})`;
+        ctx.fillRect(Math.random()*c.width, Math.random()*c.height, 2, 2);
+      }
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      return tex;
+    }
+
+    const rainbowTex = makeRainbowTexture();
+
+    function spawnRainbowBeam(start, end){
+      const dir = end.clone().sub(start);
+      const len = dir.length();
+      if (len < 0.001) return;
+      dir.normalize();
+
+      const geo = new THREE.CylinderGeometry(0.16, 0.16, len, 18, 1, true);
+      const mat = new THREE.MeshStandardMaterial({
+        map: rainbowTex,
+        emissive: 0xffffff,
+        emissiveIntensity: 1.25,
+        transparent: true,
+        opacity: 0.95,
+        side: THREE.DoubleSide
+      });
+
+      // ripeti l’arcobaleno lungo il raggio
+      mat.map.repeat.set(Math.max(2, len * 0.8), 1);
+
+      const beam = new THREE.Mesh(geo, mat);
+
+      // posiziona a metà
+      const mid = start.clone().add(end).multiplyScalar(0.5);
+      beam.position.copy(mid);
+
+      // orienta il cilindro (di default sta “in verticale”)
+      const up = new THREE.Vector3(0,1,0);
+      beam.quaternion.setFromUnitVectors(up, dir);
+
+      beam.userData.life = 0.18; // dura poco, come magia
+      beam.userData.noAutoFade = true; // non farlo diventare trasparente per colpa di updateParticles
+      fxGroup.add(beam);
+      particles.push(beam);
+
+      // palline arcobaleno lungo il raggio
+      const colors = [0xff0000,0xff7a00,0xffee00,0x00ff00,0x00ffff,0x0000ff,0xff00ff];
+      for (let i=0;i<7;i++){
+        const s = new THREE.Mesh(
+          new THREE.SphereGeometry(0.13, 12, 12),
+          new THREE.MeshStandardMaterial({color: colors[i], emissive: colors[i], emissiveIntensity: 1.6, transparent:true, opacity:0.95})
+        );
+        const t = (i+1)/8;
+        s.position.copy(start).add(end.clone().sub(start).multiplyScalar(t));
+        s.userData.life = 0.22;
+        s.userData.noAutoFade = true;
+        fxGroup.add(s);
+        particles.push(s);
+      }
+    }
+
+    function spawnRainbowBurst(x,y,z, amount=20){
+      const cols=[0xff0000,0xff7a00,0xffee00,0x00ff00,0x00ffff,0x0000ff,0xff00ff];
+      for(let i=0;i<amount;i++){
+        const c = cols[(Math.random()*cols.length)|0];
+        const p = new THREE.Mesh(
+          new THREE.SphereGeometry(0.06,10,10),
+          new THREE.MeshStandardMaterial({color:c, emissive:c, emissiveIntensity:1.7, transparent:true, opacity:0.95})
+        );
+        p.position.set(x+rand(-0.4,0.4), y+rand(-0.2,0.6), z+rand(-0.4,0.4));
+        p.userData.vel = new THREE.Vector3(rand(-0.06,0.06), rand(0.02,0.09), rand(-0.06,0.06));
+        p.userData.life = rand(0.6,1.2);
+        p.userData.noAutoFade = true;
+        fxGroup.add(p);
+        particles.push(p);
+      }
+    }
+
+
+    function spawnConfettiBurst(x,y,z, amount=180){
+      for(let i=0;i<amount;i++){
+        const cols=[0xff0000,0x00ff00,0x0000ff,0xffff00,0xff00ff,0x00ffff];
+        const c = cols[(Math.random()*cols.length)|0];
+        const conf = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.22,0.34),
+          new THREE.MeshStandardMaterial({color:c, side:THREE.DoubleSide, transparent:true, opacity:0.95})
+        );
+        conf.position.set(x+rand(-2,2), y+rand(0,3), z+rand(-2,2));
+        conf.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+        conf.userData.vel = new THREE.Vector3(rand(-0.09,0.09), rand(0.10,0.28), rand(-0.09,0.09));
+        conf.userData.life = rand(2.4,4.2);
+        fxGroup.add(conf);
+        particles.push(conf);
+      }
+    }
+
+    // ------------------ Giorno/notte (G) ------------------
+    function setDayNight(night){
+      isNight = night;
+      if(night){
+        scene.background = new THREE.Color(0x081025);
+        ambient.intensity = 0.28;
+        sun.intensity = 0.35;
+        if (fogEnabled) scene.fog = new THREE.Fog(0x081025, 30, 170);
+      } else {
+        scene.background = new THREE.Color(levelSky);      // <-- torna ESATTAMENTE come all'inizio del livello
+        ambient.intensity = 0.60;
+        sun.intensity = 1.05;
+        if (fogEnabled) scene.fog = new THREE.Fog(levelSky, 30, 170);
+        else scene.fog = null;
+      }
+    }
+
+    // ------------------ Altezza terreno + lava ------------------
+    function baseYAt(x,z){
+      if (UNDERWATER.has(level)) return 6;
+      const bh = bridgeHeightAt(x,z);
+      if (bh !== null) return bh;
+      return 0;
+    }
+
+    function inLava(x,z){
+      if (!lava) return false;
+      const w = lava.geometry.parameters.width;
+      const h = lava.geometry.parameters.height;
+      const inRect = Math.abs(x - lava.position.x) < w/2 && Math.abs(z - lava.position.z) < h/2;
+      const onBridge = (bridgeHeightAt(x,z) !== null);
+      return inRect && !onBridge;
+    }
+
+    // ------------------ HUD ------------------
+    function updateHealthBar(){
+      const pct = Math.round(100 * lives / LIVES_MAX);
+      healthFill.style.width = pct + "%";
+    }
+
+    function setHud(msgExtra=""){
+      const themeName = UNDERWATER.has(level) ? "Mare magico" : "Prato magico";
+      const msg =
+        `👑 Felisia • Livello ${level}/${MAX_LEVEL} • ${themeName}<br>`+
+        `⭐ Stelline: ${starsGot}/${starsNeed} ${bigStar?"+ ⭐gigante":""}<br>`+
+        `❤️ Vite: ${lives}/${LIVES_MAX} (${Math.round(100*lives/LIVES_MAX)}%)<br>`+
+        `${dragonAlive ? `🐉 Drago: ${dragonHP} HP` : (starsGot>=starsNeed ? "🐉 Il drago sta arrivando..." : "")}<br>`+
+        `${audioOn ? "🔊 Suoni: ON" : "🔇 Clicca una volta per attivare i suoni"}<br>`+
+        `${msgExtra ? "✨ " + msgExtra : ""}`;
+      hud.innerHTML = msg;
+    }
+
+    function damagePlayer(reason){
+      if (gameOver || winState) return;
+      lives = Math.max(0, lives-1);
+      sndHit();
+      updateHealthBar();
+
+      if (lives <= 0){
+        gameOver = true;
+        setHud("💥 GAME OVER! Premi R per riprovare.");
+      } else {
+        setHud("💢 Ahi! " + reason + " (ti restano " + lives + " vite)");
+        spawnConfettiBurst(player.position.x, player.position.y+2, player.position.z, 60);
+      }
+    }
+
+    // ------------------ Reset / build livello ------------------
+    function clearWorld(){
+      while(world.children.length) world.remove(world.children[0]);
+      while(fxGroup.children.length) fxGroup.remove(fxGroup.children[0]);
+
+      stars.length = 0;
+      fishies.length = 0;
+      sharks.length = 0;
+      particles.length = 0;
+      flames.length = 0;
+      kakiTrees.length = 0;
+      butterflies.length = 0;
+
+      bigStar = null;
+      cake = null;
+      portal = null; portalActive = false;
+
+      dragon = null; dragonAlive = false; dragonHP = 0; flameCooldown = 0;
+
+      lava = null; lavaMat = null;
+      bridge.group = null;
+      bridge2 = null;
+
+      castle = null;
+      castleDoor = null;
+      castleDoorOpen = false;
+
+      buddyFish = null;
+
+      if (dog) scene.remove(dog);
+      dog = null;
+
+      sitting = false;
+      sitMode = "none";
+
+      paletteDelivery.active = false;
+
+      const makeup = player.getObjectByName("makeup");
+      if (makeup) makeup.visible = false;
+      const brush = player.getObjectByName("brush");
+      if (brush) brush.visible = false;
+      player.userData._hairMat.emissiveIntensity = 0.15;
+    }
+
+    function placeStars(){
+      starsNeed = 8 + level*2;
+      starsGot = 0;
+
+      const spread = worldSize*0.42;
+      for(let i=0;i<starsNeed;i++){
+        const s = createStarMesh(1);
+        let x = rand(-spread, spread);
+        let z = rand(-spread, spread);
+
+        if (!UNDERWATER.has(level)) {
+          for(let k=0;k<10;k++){
+            if(inLava(x,z) || dist2(x,z, -worldSize*0.35, -worldSize*0.35) < 18*18){
+              x = rand(-spread, spread);
+              z = rand(-spread, spread);
+            }
+          }
+        }
+
+        const y = baseYAt(x,z) + 0.12;
+        s.position.set(x,y,z);
+        world.add(s);
+        stars.push(s);
+      }
+
+      if (!UNDERWATER.has(level)) {
+        bigStar = createStarMesh(2.8);
+        bigStar.material.emissiveIntensity = 1.0;
+        bigStar.position.set(bridge.cx, bridgeHeightAt(bridge.cx, bridge.cz)+0.35, bridge.cz);
+        world.add(bigStar);
+      } else {
+        bigStar = createStarMesh(2.8);
+        bigStar.material.emissiveIntensity = 1.0;
+        bigStar.position.set(8, baseYAt(8, 8)+0.35, 8);
+        world.add(bigStar);
+      }
+
+      starsNeed += 1; // include la gigante
+    }
+
+    function placeCake(){
+      cake = createCakeSlice();
+      const spread = worldSize*0.28;
+      let x = rand(-spread, spread);
+      let z = rand(-spread, spread);
+      if (!UNDERWATER.has(level)) {
+        for(let k=0;k<12;k++){
+          if(inLava(x,z)) { x = rand(-spread, spread); z = rand(-spread, spread); }
+        }
+      }
+      const y = baseYAt(x,z) + 0.05;
+      cake.position.set(x,y,z);
+      world.add(cake);
+    }
+
+    function buildMeadow(){
+      const gMat = new THREE.MeshStandardMaterial({color:0x228b22, roughness:0.9});
+      ground = new THREE.Mesh(new THREE.PlaneGeometry(worldSize, worldSize), gMat);
+      ground.rotation.x = -Math.PI/2;
+      world.add(ground);
+
+      lavaMat = new THREE.MeshStandardMaterial({
+        color:0xff4500, emissive:0xff2200, emissiveIntensity:1.2, roughness:0.45, metalness:0.25
+      });
+      lava = new THREE.Mesh(new THREE.PlaneGeometry(12, 9), lavaMat);
+      lava.rotation.x = -Math.PI/2;
+      lava.position.set(0, 0.02, -8);
+      world.add(lava);
+
+      // ponte ad arco sopra la lava
+      const b = new THREE.Group();
+      const bMat = new THREE.MeshStandardMaterial({color:0x8b4513, roughness:0.85});
+      const cx=0, cz=-8;
+      const len=110, wid=4.4;
+      const segs=62, segLen=len/segs;
+
+      bridge.cx = cx; bridge.cz = cz;
+      bridge.halfL = len/2;
+      bridge.halfW = wid/2;
+      bridge.baseH = 0.28;
+      bridge.archH = 3.6;
+      bridge.th = 0.46;
+
+      for(let i=0;i<segs;i++){
+        const t = i/(segs-1);
+        const xLocal = (t-0.5)*len;
+        const norm = xLocal/bridge.halfL;
+        const y = bridge.baseH + bridge.archH*(1 - norm*norm);
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(segLen, bridge.th, wid), bMat);
+        seg.position.set(cx+xLocal, y, cz);
+        b.add(seg);
+      }
+      world.add(b);
+      bridge.group = b;
+
+      // 2 prati collegati da un ponte (non lava)
+      const river = new THREE.Mesh(
+        new THREE.PlaneGeometry(16, 60),
+        new THREE.MeshStandardMaterial({color:0x1e90ff, transparent:true, opacity:0.9})
+      );
+      river.rotation.x = -Math.PI/2;
+      river.position.set(worldSize*0.30, 0.02, worldSize*0.10);
+      world.add(river);
+
+      bridge2 = new THREE.Group();
+      const b2Mat = new THREE.MeshStandardMaterial({color:0x8b4513, roughness:0.85});
+      const b2L=16, b2W=4.4, b2Segs=10, b2SegLen=b2L/b2Segs;
+      for(let i=0;i<b2Segs;i++){
+        const t=i/(b2Segs-1);
+        const xLocal=(t-0.5)*b2L;
+        const seg=new THREE.Mesh(new THREE.BoxGeometry(b2SegLen,0.46,b2W), b2Mat);
+        seg.position.set(river.position.x+xLocal, 0.55, river.position.z);
+        bridge2.add(seg);
+      }
+      world.add(bridge2);
+
+      // alberi normali
+      const treeMat = new THREE.MeshStandardMaterial({color:0x1f7a1f});
+      const trunkMat = new THREE.MeshStandardMaterial({color:0x6b3f1f});
+      function tree(x,z){
+        const g = new THREE.Group();
+        const tr = new THREE.Mesh(new THREE.CylinderGeometry(0.25,0.35,2.2,10), trunkMat);
+        tr.position.y=1.1; g.add(tr);
+        const le = new THREE.Mesh(new THREE.SphereGeometry(1.1,16,16), treeMat);
+        le.position.y=2.4; g.add(le);
+        g.position.set(x,0,z);
+        return g;
+      }
+
+      const near = 95;
+      const treesCount = 10 + Math.floor(level/2);
+      for(let i=0;i<treesCount;i++){
+        const x = rand(-near, near);
+        const z = rand(-near, near);
+        if(inLava(x,z)) continue;
+        if(dist2(x,z, -worldSize*0.35, -worldSize*0.35) < 18*18) continue;
+        world.add(tree(x,z));
+      }
+
+      // 🍊 kaki con frutti visibili
+      const kakiCount = 6 + Math.floor(level/4);
+      for(let i=0;i<kakiCount;i++){
+        let x = rand(-near, near);
+        let z = rand(-near, near);
+        for(let k=0;k<12;k++){
+          if(inLava(x,z) || dist2(x,z, -worldSize*0.35, -worldSize*0.35) < 18*18){
+            x = rand(-near, near);
+            z = rand(-near, near);
+          }
+        }
+        addKakiTree(createKakiTree(x,z));
+      }
+
+      // castello
+      castle = createCastle();
+      castle.position.set(-worldSize*0.35, 0, -worldSize*0.35);
+      world.add(castle);
+
+      const bed = castle.getObjectByName("bed");
+      if (bed) {
+        const p = new THREE.Vector3();
+        bed.getWorldPosition(p);
+        bedPos.copy(p);
+      }
+
+      // trono
+      const thr = castle.getObjectByName("throne");
+      if (thr) {
+        const p2 = new THREE.Vector3();
+        thr.getWorldPosition(p2);
+        thronePos.copy(p2);
+      } else {
+        thronePos.set(9999,9999,9999);
+      }
+
+      // farfalle nel prato
+      addButterflies();
+    }
+
+    function buildSea(){
+      const sandMat = new THREE.MeshStandardMaterial({color:0xcbb88a, roughness:0.95});
+      ground = new THREE.Mesh(new THREE.PlaneGeometry(worldSize, worldSize), sandMat);
+      ground.rotation.x = -Math.PI/2;
+      ground.position.y = 0;
+      world.add(ground);
+
+      fogEnabled = true;
+
+      // bolle
+      const bubbleMat = new THREE.MeshStandardMaterial({color:0x99ddff, transparent:true, opacity:0.35, emissive:0x66ccff, emissiveIntensity:0.2});
+      for(let i=0;i<70;i++){
+        const b = new THREE.Mesh(new THREE.SphereGeometry(rand(0.10,0.25), 10,10), bubbleMat);
+        b.position.set(rand(-worldSize*0.35, worldSize*0.35), rand(3,18), rand(-worldSize*0.35, worldSize*0.35));
+        b.userData.velY = rand(0.01,0.04);
+        world.add(b);
+        fishies.push(b);
+      }
+
+      // pesci buoni
+      const fishCount = 16 + Math.floor(level/2);
+      for(let i=0;i<fishCount;i++){
+        const f = createFish(0x66ffcc);
+        f.position.set(rand(-60,60), rand(6,18), rand(-60,60));
+        f.userData.speed = rand(0.02,0.05);
+        world.add(f);
+        fishies.push(f);
+      }
+
+      // squali (NON ti seguono: girano a caso)
+      const sharkCount = 6 + Math.floor(level/2);
+      for(let i=0;i<sharkCount;i++){
+        const s = createShark();
+        s.scale.set(1.25,1.25,1.25);
+        s.position.set(rand(-70,70), rand(8,16), rand(-70,70));
+        world.add(s);
+        sharks.push(s);
+      }
+
+      // pesciolino amico arancione a strisce nere e bianche
+      const tex = makeStripedFishTexture();
+      buddyFish = createFish(0xff8c1a, tex);
+      buddyFish.scale.set(0.9,0.9,0.9);
+      buddyFish.position.set(2, 10, 2);
+      world.add(buddyFish);
+
+      // castello anche nel mare (magico!)
+      castle = createCastle();
+      castle.position.set(-worldSize*0.35, 0, -worldSize*0.35);
+      world.add(castle);
+
+      const bed = castle.getObjectByName("bed");
+      if (bed) {
+        const p = new THREE.Vector3();
+        bed.getWorldPosition(p);
+        bedPos.copy(p);
+      }
+
+      // trono
+      const thr = castle.getObjectByName("throne");
+      if (thr) {
+        const p2 = new THREE.Vector3();
+        thr.getWorldPosition(p2);
+        thronePos.copy(p2);
+      } else {
+        thronePos.set(9999,9999,9999);
+      }
+
+      // farfalle nel prato
+      addButterflies();
+    }
+
+    function buildDog(){
+      dog = createDog();
+      dog.position.set(-2, baseYAt(-2,2), 2);
+      scene.add(dog);
+    }
+
+    function setupLevel(n){
+      level = clamp(n,1,MAX_LEVEL);
+      worldSize = 280 + level*22;
+
+      lives = LIVES_MAX;                 // <-- sempre 3 a ogni livello
+      updateHealthBar();
+      gameOver = false;
+      winState = false;
+
+      fogEnabled = UNDERWATER.has(level);
+      clearWorld();
+      sitting = false; sitMode = "none";
+
+      if (UNDERWATER.has(level)) levelSky = 0x55c5ff;
+      else {
+        const skies = [0x87ceeb,0x7fd4ff,0x90ddff,0x95e0ff,0xffc9f2,0x9ee6ff];
+        levelSky = skies[(level-1) % skies.length];
+      }
+
+      scene.background = new THREE.Color(levelSky);
+      scene.fog = fogEnabled ? new THREE.Fog(levelSky, 30, 170) : null;
+      setDayNight(false);
+
+      if (UNDERWATER.has(level)) buildSea();
+      else buildMeadow();
+
+      placeStars();
+      placeCake();
+      buildDog();
+
+      player.position.set(0, baseYAt(0,0), 0);
+      velY = 0; jumping = false;
+      flightMode = "ground";
+      const wings = player.getObjectByName("wings");
+      if (wings) wings.visible = false;
+
+      dragonAlive = false; dragonHP = 0;
+      castleDoorOpen = false;
+      if (castleDoor) castleDoor.rotation.y = 0;
+
+      setHud("Benvenuta! Prendi tutte le stelline ⭐ (anche la gigante!)");
+    }
+
+    // ------------------ Porta castello / trucco / spazzola ------------------
+    function doorWorldPos(){
+      if (!castleDoor) return null;
+      const p = new THREE.Vector3();
+      castleDoor.getWorldPosition(p);
+      return p;
+    }
+
+    function tryToggleDoor(){
+      if (!castleDoor) return;
+      const p = doorWorldPos();
+      if (!p) return;
+      if (player.position.distanceTo(p) > 7) {
+        setHud("Vai vicino alla porta del castello per aprirla (O)");
+        return;
+      }
+      castleDoorOpen = !castleDoorOpen;
+      castleDoor.rotation.y = castleDoorOpen ? -Math.PI/2 : 0;
+      setHud(castleDoorOpen ? "🔓 Porta aperta! Entra!" : "🔒 Porta chiusa!");
+    }
+
+    function tryToggleThrone(){
+      if (!castle) { setHud("Il trono è nel castello!"); return; }
+
+      // se sei già seduta sul trono: alzati
+      if (sitting && sitMode === "throne") {
+        sitting = false;
+        sitMode = "none";
+        setHud("👑 Ti sei alzata dal trono!");
+        return;
+      }
+
+      if (player.position.distanceTo(thronePos) > 8) {
+        setHud("Vai vicino al trono nel castello e premi Y per sederti!");
+        return;
+      }
+
+      sitMode = "throne";
+      sitting = true;
+
+      // posizione seduta (sul cuscino)
+      player.position.lerp(new THREE.Vector3(thronePos.x, baseYAt(thronePos.x,thronePos.z)+0.72, thronePos.z+0.55), 0.85);
+      player.rotation.y = 0; // guardi verso la porta
+      spawnSparkle(player.position.x, player.position.y+1.8, player.position.z, 10);
+
+      setHud("👑 Sei sul trono! Premi Y per alzarti.");
+    }
+
+    function cycleDress(){
+      const mat = player.userData._dressMat;
+      if (!mat) return;
+      dressIndex = (dressIndex + 1) % dressVariants.length;
+      const dv = dressVariants[dressIndex];
+      mat.color.setHex(dv.color);
+      mat.emissive.setHex(dv.color);
+      mat.emissiveIntensity = 0.28;
+      spawnSparkle(player.position.x, player.position.y+1.9, player.position.z, 14);
+      setHud("👗 Vestito: " + dv.name + "!");
+    }
+
+    function tryMakeup(){
+      if (!bedPos) return;
+      if (player.position.distanceTo(bedPos) > 8) {
+        setHud("Vai vicino al letto nel castello per truccarti (T)");
+        return;
+      }
+      sitting = true;
+      sitMode = "bed";
+      paletteDelivery.active = true;
+      paletteDelivery.t = 1.2;
+      setHud("💄 Il maggiordomo ti porta la palette...");
+
+      // “seduta” vicino al letto
+      player.position.lerp(new THREE.Vector3(bedPos.x-0.2, baseYAt(bedPos.x,bedPos.z)+0.05, bedPos.z+1.0), 0.65);
+      player.rotation.y = Math.PI; // guardi verso il letto
+    }
+
+    function applyMakeupNow(){
+      const makeup = player.getObjectByName("makeup");
+      if (makeup) makeup.visible = true;
+      spawnSparkle(player.position.x, player.position.y+2.0, player.position.z, 22);
+      spawnConfettiBurst(player.position.x, player.position.y+2.0, player.position.z, 200);
+      setHud("💄 Ti sei truccata (fucsia, rosa, verde fosforescente)!");
+    }
+
+    function brushHair(){
+      const brush = player.getObjectByName("brush");
+      if (brush) brush.visible = true;
+      player.userData._hairMat.emissiveIntensity = 0.65;
+      setHud("💇‍♀️ Ti stai spazzolando!");
+      spawnSparkle(player.position.x, player.position.y+2.0, player.position.z, 12);
+      player.userData._brushTimer = 1.4;
+    }
+
+    // ------------------ Drago ------------------
+    function spawnDragon(){
+      if (dragonAlive || winState || gameOver) return;
+      dragon = createDragon();
+      dragon.position.set(worldSize*0.28, baseYAt(worldSize*0.28, worldSize*0.10)+2.8, worldSize*0.10);
+      dragon.scale.set(1.35,1.35,1.35);
+      world.add(dragon);
+
+      dragonAlive = true;
+      dragonHP = 18;
+      setHud("🐉 Il drago è arrivato! Usa P per i poteri!");
+      beep(110,0.25,"sawtooth",0.08);
+    }
+
+    function defeatDragon(){
+      dragonAlive = false;
+      winState = true;
+      if (dragon) {
+        spawnConfettiBurst(dragon.position.x, dragon.position.y+3, dragon.position.z, 500); // tantissimi coriandoli!
+        spawnSparkle(dragon.position.x, dragon.position.y+3, dragon.position.z, 40);
+        world.remove(dragon);
+        dragon = null;
+      }
+      sndWin();
+      setHud("🎉 Hai vinto! Si apre il portale! Entra per il livello dopo 🌀");
+
+      portal = createPortal();
+      const px = player.position.x + 10;
+      const pz = player.position.z + 8;
+      portal.position.set(px, baseYAt(px,pz)+0.02, pz);
+      world.add(portal);
+      portalActive = true;
+    }
+
+    // ------------------ Poteri (P) ------------------
+    function shootPower(){
+      if (gameOver || winState) return;
+
+      const dir = new THREE.Vector3();
+      dir.subVectors(player.position, camera.position).normalize();
+      const start = player.position.clone().add(new THREE.Vector3(0,1.6,0));
+      const ray = new THREE.Raycaster(start, dir, 0, 45);
+
+      // fine del raggio “di default” (se non colpisci niente)
+      let beamEnd = start.clone().add(dir.clone().multiplyScalar(35));
+
+      spawnSparkle(start.x, start.y, start.z, 14);
+      beep(880,0.06,"triangle",0.07);
+
+      // ✅ Colpisci il drago con poteri più forti + arcobaleno
+      if (dragonAlive && dragon) {
+        const hits = ray.intersectObject(dragon, true);
+        if (hits && hits.length) {
+          beamEnd = hits[0].point.clone();
+
+          spawnRainbowBeam(start, beamEnd);
+          spawnRainbowBurst(beamEnd.x, beamEnd.y, beamEnd.z, 26);
+
+          // coriandoli quando colpisci davvero
+          spawnConfettiBurst(beamEnd.x, beamEnd.y, beamEnd.z, 120);
+
+          const distance = player.position.distanceTo(dragon.position);
+
+          // Potere forte: da lontano -6, da vicino SUPER -9
+          const dmg = (distance < 18) ? 9 : 6;
+          dragonHP -= dmg;
+
+          spawnSparkle(beamEnd.x, beamEnd.y, beamEnd.z, 22);
+
+          if (dragonHP <= 0) defeatDragon();
+          else setHud("✨ Colpito! Drago HP: " + dragonHP);
+          return;
+        }
+      }
+
+      // ✅ Poteri anche sott’acqua: elimini squali
+      if (sharks.length) {
+        for (let i=sharks.length-1;i>=0;i--){
+          const s = sharks[i];
+          const hits = ray.intersectObject(s, true);
+          if (hits && hits.length) {
+            beamEnd = hits[0].point.clone();
+            spawnRainbowBeam(start, beamEnd);
+            spawnRainbowBurst(beamEnd.x, beamEnd.y, beamEnd.z, 18);
+            spawnSparkle(beamEnd.x, beamEnd.y, beamEnd.z, 22);
+            world.remove(s);
+            sharks.splice(i,1);
+            setHud("🦈 Squalo sconfitto con i poteri!");
+            return;
+          }
+        }
+      }
+
+      // se non colpisci niente: fai vedere comunque il raggio arcobaleno
+      spawnRainbowBeam(start, beamEnd);
+    }
+
+    // ------------------ Input ------------------
+    window.addEventListener("keydown", (e) => {
+      unlockAudio();
+
+      const k = e.key;
+
+      // numeri -> vai al livello
+      if (k >= "0" && k <= "9") {
+        const now = performance.now();
+        if (now - lvlBufTime > 650) lvlBuf = "";
+        lvlBufTime = now;
+        lvlBuf += k;
+
+        let n = parseInt(lvlBuf,10);
+        if (n>=1 && n<=MAX_LEVEL) { setupLevel(n); return; }
+
+        // fallback: single digit
+        lvlBuf = k;
+        n = parseInt(lvlBuf,10);
+        if (n>=1 && n<=MAX_LEVEL) setupLevel(n);
+        return;
+      }
+
+      if (k in keys) keys[k] = true;
+
+      if (k === "z" || k === "Z") camDist = clamp(camDist-2, 12, 100);
+      if (k === "x" || k === "X") camDist = clamp(camDist+2, 12, 100);
+
+      if (k === "m" || k === "M") {
+        mapVisible = !mapVisible;
+        minimap.style.display = mapVisible ? "block" : "none";
+      }
+
+      if (k === "g" || k === "G") {
+        setDayNight(!isNight);
+        setHud(isNight ? "🌙 Notte magica!" : "☀️ Giorno!");
+      }
+
+      if ((k === " " || e.code === "Space") && !jumping && flightMode==="ground" && !sitting) {
+        jumping = true;
+        velY = 0.55;
+      }
+
+      // super salto + super scatto
+      if ((k === "s" || k === "S") && dashCooldown<=0 && !sitting) {
+        dashCooldown = 0.9;
+        if (flightMode==="ground" && !jumping) {
+          jumping = true;
+          velY = 0.95;
+        }
+        const fwd = new THREE.Vector3().subVectors(player.position, camera.position).normalize();
+        player.position.add(fwd.multiplyScalar(2.3));
+        spawnSparkle(player.position.x, player.position.y+1.2, player.position.z, 10);
+      }
+
+      if (k === "w" || k === "W") {
+        flightMode = "ascend";
+        const wings = player.getObjectByName("wings");
+        if (wings) wings.visible = true;
+      }
+      if (k === "n" || k === "N") {
+        flightMode = "descend";
+        const wings = player.getObjectByName("wings");
+        if (wings) wings.visible = true;
+      }
+
+      if (k === "p" || k === "P") shootPower();
+      if (k === "o" || k === "O") tryToggleDoor();
+      if (k === "t" || k === "T") tryMakeup();
+      if (k === "h" || k === "H") brushHair();
+      if (k === "y" || k === "Y") tryToggleThrone();
+      if (k === "c" || k === "C") cycleDress();
+
+      if ((k === "r" || k === "R") && gameOver) setupLevel(level);
+    });
+
+    window.addEventListener("keyup", (e) => {
+      const k = e.key;
+      if (k in keys) keys[k] = false;
+
+      if (k === "w" || k === "W") {
+        if (flightMode === "ascend") flightMode = "hover";  // molli W -> resti sospesa
+      }
+    });
+
+    window.addEventListener("wheel", (e) => {
+      camDist = clamp(camDist + Math.sign(e.deltaY)*2, 12, 100);
+    }, {passive:true});
+
+    // ------------------ Camera ------------------
+    function updateCamera(){
+      camera.position.x = player.position.x;
+      camera.position.z = player.position.z + camDist;
+      camera.position.y = camHeight + (UNDERWATER.has(level) ? 4 : 0);
+      camera.lookAt(player.position.x, player.position.y + 1.4, player.position.z);
+    }
+
+    // ------------------ raccolte ------------------
+    let lavaDamageCd = 0;
+    let sharkDamageCd = 0;
+
+    function checkCollects(){
+      if (gameOver || winState) return;
+
+      for (let i=stars.length-1;i>=0;i--){
+        const s = stars[i];
+        s.rotation.z += s.userData.spin;
+        if (player.position.distanceTo(s.position) < 1.1) {
+          world.remove(s);
+          stars.splice(i,1);
+          starsGot++;
+          sndStar();
+          spawnSparkle(player.position.x, player.position.y+1.8, player.position.z, 10);
+          setHud("⭐ Presa!");
+          if (starsGot >= starsNeed) spawnDragon();
+        }
+      }
+
+      if (bigStar) {
+        bigStar.rotation.z += 0.018;
+        if (player.position.distanceTo(bigStar.position) < 1.6) {
+          world.remove(bigStar);
+          bigStar = null;
+          starsGot++;
+          sndStar();
+          spawnConfettiBurst(player.position.x, player.position.y+2, player.position.z, 180);
+          setHud("⭐ GIGANTE presa!");
+          if (starsGot >= starsNeed) spawnDragon();
+        }
+      }
+
+      if (cake) {
+        cake.rotation.y += cake.userData.spin;
+        if (player.position.distanceTo(cake.position) < 1.4) {
+          world.remove(cake);
+          cake = null;
+          sndCake();
+          if (lives < LIVES_MAX) {
+            lives++;
+            updateHealthBar();
+            setHud("🍰 Hai mangiato la torta! +1 vita!");
+          } else {
+            setHud("🍰 Che buona! Sei già a 3 vite!");
+          }
+          spawnConfettiBurst(player.position.x, player.position.y+2, player.position.z, 180);
+        }
+      }
+
+      if (portalActive && portal) {
+        portal.userData.t += 0.02;
+        const s = 1 + Math.sin(portal.userData.t*3.5)*0.06;
+        portal.scale.set(s,s,s);
+        portal.rotation.y += 0.02;
+
+        if (player.position.distanceTo(portal.position) < 2.3) {
+          const next = (level >= MAX_LEVEL) ? 1 : level+1;
+          setupLevel(next);
+        }
+      }
+    }
+
+    // ------------------ Drago update ------------------
+    function updateDragon(dt){
+      if (!dragonAlive || !dragon) return;
+
+      dragon.userData.time += dt;
+      const t = dragon.userData.time;
+
+      const cx = worldSize*0.22;
+      const cz = worldSize*0.08;
+      dragon.position.x = cx + Math.cos(t*0.7)*12;
+      dragon.position.z = cz + Math.sin(t*0.7)*12;
+      dragon.position.y = baseYAt(dragon.position.x, dragon.position.z) + 3.1 + Math.sin(t*1.6)*0.4;
+
+      const look = player.position.clone();
+      look.y = dragon.position.y;
+      dragon.lookAt(look);
+
+      flameCooldown -= dt;
+      if (flameCooldown <= 0) {
+        flameCooldown = 0.75;
+
+        const mouth = new THREE.Vector3(3.15,0.20,0);
+        mouth.applyMatrix4(dragon.matrixWorld);
+
+        const dir = player.position.clone().add(new THREE.Vector3(0,1.4,0)).sub(mouth).normalize();
+        spawnFlame(mouth, dir); // fiamme, NON palline
+      }
+    }
+
+    function updateFlames(dt){
+      for (let i=flames.length-1;i>=0;i--){
+        const f = flames[i];
+
+        f.userData.life -= dt;
+
+        // posizione precedente
+        const prev = f.userData.prev || f.position.clone();
+
+        // nuova posizione: vel * dt
+        const next = prev.clone().addScaledVector(f.userData.vel, dt);
+
+        f.position.copy(next);
+        f.userData.prev = next.clone();
+
+        f.rotation.y += 0.25;
+
+        if (!gameOver && !winState){
+          // punto del corpo di Felisia (un po’ più su del terreno)
+          const target = player.position.clone().add(new THREE.Vector3(0,1.2,0));
+
+          // distanza dal SEGMENTO prev->next (così non “salta” via)
+          const seg = next.clone().sub(prev);
+          const len2 = seg.lengthSq() || 1e-6;
+
+          const t = clamp(target.clone().sub(prev).dot(seg)/len2, 0, 1);
+          const closest = prev.clone().add(seg.multiplyScalar(t));
+
+          if (closest.distanceTo(target) < (f.userData.radius || 1.8)){
+            fxGroup.remove(f);
+            flames.splice(i,1);
+            damagePlayer("🔥 Fiamma del drago!");
+            continue;
+          }
+        }
+
+        if (f.userData.life <= 0){
+          fxGroup.remove(f);
+          flames.splice(i,1);
+        }
+      }
+    }
+
+    // ------------------ Mare: pesci/squali ------------------
+    function updateSea(dt){
+      if (!UNDERWATER.has(level)) return;
+
+      for (const o of fishies){
+        if (!o) continue;
+        if (o.userData.velY) {
+          o.position.y += o.userData.velY;
+          if (o.position.y > 22) o.position.y = rand(3,10);
+        } else {
+          o.userData.phase += dt*1.5;
+          const sp = o.userData.speed || 0.03;
+          o.position.x += Math.cos(o.userData.phase)*sp;
+          o.position.z += Math.sin(o.userData.phase)*sp;
+          o.rotation.y = Math.atan2(Math.sin(o.userData.phase), Math.cos(o.userData.phase));
+        }
+      }
+
+      if (buddyFish) {
+        const target = player.position.clone().add(new THREE.Vector3(-1.2, 2.5, 1.0));
+        buddyFish.position.lerp(target, 0.05);
+        buddyFish.lookAt(player.position.x, buddyFish.position.y, player.position.z);
+      }
+
+      sharkDamageCd = Math.max(0, sharkDamageCd - dt);
+
+      // squali NON ti seguono: target casuali
+      for (const s of sharks){
+        s.userData.phase += dt*0.9;
+        const sp = s.userData.speed || 0.05;
+
+        const tgt = s.userData.target;
+        const to = tgt.clone().sub(s.position);
+        if (to.length() < 2.5){
+          s.userData.target = new THREE.Vector3(rand(-80,80), rand(7,16), rand(-80,80));
+        }
+        to.normalize();
+        s.position.add(to.multiplyScalar(sp));
+        s.position.y += Math.sin(s.userData.phase*2.0)*0.01;
+
+        s.lookAt(s.userData.target);
+
+        if (!gameOver && !winState && sharkDamageCd<=0 && player.position.distanceTo(s.position) < 1.6){
+          sharkDamageCd = 0.9;
+          damagePlayer("🦈 Squalo!");
+        }
+      }
+    }
+
+    // ------------------ Cane segue ------------------
+    function updateDog(dt){
+      if (!dog) return;
+      dog.userData.barkCd = Math.max(0, (dog.userData.barkCd||0) - dt);
+
+      const tx = player.position.x - 1.3;
+      const tz = player.position.z + 1.8;
+      const ty = baseYAt(tx,tz);
+
+      dog.position.lerp(new THREE.Vector3(tx, ty, tz), 0.08);
+      dog.lookAt(player.position.x, dog.position.y, player.position.z);
+
+      const nearPortal = portalActive && portal && player.position.distanceTo(portal.position) < 9;
+      const nearDragon = dragonAlive && dragon && player.position.distanceTo(dragon.position) < 18;
+
+      if ((nearPortal || nearDragon) && dog.userData.barkCd===0){
+        beep(330,0.06,"square",0.03); setTimeout(()=>beep(440,0.06,"square",0.03),70);
+        dog.userData.barkCd = 1.4;
+      }
+    }
+
+    // ------------------ Maggiordomi/Spazzola ------------------
+    function updateButlers(dt){
+      if (!castle || !butlers.length) return;
+
+      for (const b of butlers){
+        b.userData.phase += dt*1.2;
+        b.position.x = b.userData.home.x + Math.sin(b.userData.phase)*0.08;
+        b.rotation.y = Math.sin(b.userData.phase*0.8)*0.25;
+      }
+
+      if (paletteDelivery.active) {
+        paletteDelivery.t -= dt;
+        if (paletteDelivery.t <= 0) {
+          paletteDelivery.active = false;
+          applyMakeupNow();
+          sndWin();
+          sitting = false; // finito trucco, puoi rialzarti
+          sitMode = "none";
+        } else {
+          if (Math.random() < 0.35) spawnSparkle(player.position.x, player.position.y+2, player.position.z, 6);
+        }
+      }
+
+      if (player.userData._brushTimer) {
+        player.userData._brushTimer -= dt;
+        const brush = player.getObjectByName("brush");
+        if (brush) {
+          brush.visible = true;
+          brush.rotation.z = Math.sin(performance.now()*0.02)*0.6;
+          brush.position.y = 2.0 + Math.sin(performance.now()*0.02)*0.05;
+        }
+        if (player.userData._brushTimer <= 0) {
+          player.userData._brushTimer = 0;
+          if (brush) brush.visible = false;
+          player.userData._hairMat.emissiveIntensity = 0.15;
+        }
+      }
+    }
+
+    // ------------------ FX particles ------------------
+    function updateParticles(dt){
+      for (let i=particles.length-1;i>=0;i--){
+        const p = particles[i];
+        if (!p.userData || !p.userData.life) continue;
+        p.userData.life -= dt;
+        if (p.userData.vel) p.position.add(p.userData.vel);
+        p.rotation.x += 0.08; p.rotation.y += 0.06;
+
+        if (p.geometry && p.geometry.type === "PlaneGeometry"){
+          p.userData.vel.y -= 0.004;
+        }
+
+        if (p.material && p.material.transparent && !(p.userData && p.userData.noAutoFade)){
+          p.material.opacity = Math.min(0.95, Math.max(0, p.userData.life/3.0));
+        }
+
+        if (p.userData.life <= 0 || p.position.y < -10){
+          fxGroup.remove(p);
+          particles.splice(i,1);
+        }
+      }
+      while (particles.length > 1200){
+        const old = particles.shift();
+        if (old) fxGroup.remove(old);
+      }
+    }
+
+    // ------------------ KAKI: messaggio vicino ------------------
+    function nearKakiMessage(){
+      if (UNDERWATER.has(level)) return null;
+      for (const kt of kakiTrees){
+        if (kt && dist2(player.position.x, player.position.z, kt.position.x, kt.position.z) < 9*9){
+          return "🍊 KAKI! Sei vicino a un albero di kaki!";
+        }
+      }
+      return null;
+    }
+
+    // ------------------ Movimento player + danni lava ------------------
+    const GRAVITY = 0.02;
+    let lavaDamageCooldown  = 0;
+
+    function updatePlayer(dt){
+      if (gameOver) return;
+
+      if (sitting) {
+        const y0 = baseYAt(player.position.x, player.position.z);
+        player.position.y = y0 + (sitMode === "throne" ? 0.72 : 0.05);
+        return;
+      }
+
+      dashCooldown = Math.max(0, dashCooldown - dt);
+
+      const speed = UNDERWATER.has(level) ? 0.14 : 0.18;
+
+      if (keys.ArrowUp)   player.position.z -= speed;
+      if (keys.ArrowDown) player.position.z += speed;
+      if (keys.ArrowLeft) player.position.x -= speed;
+      if (keys.ArrowRight)player.position.x += speed;
+
+      const lim = worldSize*0.48;
+      player.position.x = clamp(player.position.x, -lim, lim);
+      player.position.z = clamp(player.position.z, -lim, lim);
+
+      const by = baseYAt(player.position.x, player.position.z);
+
+      const wings = player.getObjectByName("wings");
+      if (flightMode === "ascend") {
+        jumping = false; velY = 0;
+        player.position.y += UNDERWATER.has(level) ? 0.22 : 0.28;
+        if (wings) wings.visible = true;
+      } else if (flightMode === "hover") {
+        if (wings) wings.visible = true;
+      } else if (flightMode === "descend") {
+        jumping = false; velY = 0;
+        if (player.position.y > by + 0.1) player.position.y -= UNDERWATER.has(level) ? 0.22 : 0.28;
+        else { player.position.y = by; flightMode = "ground"; if (wings) wings.visible = false; }
+      } else {
+        if (wings) wings.visible = false;
+
+        if (jumping){
+          velY -= GRAVITY;
+          player.position.y += velY;
+          if (player.position.y <= by){
+            player.position.y = by;
+            velY = 0;
+            jumping = false;
+          }
+        } else {
+          player.position.y = by;
+        }
+      }
+
+      lavaDamageCooldown  = Math.max(0, lavaDamageCooldown  - dt);
+      if (!UNDERWATER.has(level) && lava && lavaDamageCooldown <=0) {
+        if (inLava(player.position.x, player.position.z) && player.position.y <= 0.6) {
+            lavaDamageCooldown  = 0.8;
+          damagePlayer("🌋 Lava!");
+        }
+      }
+    }
+
+    // ------------------ Animate ------------------
+    let last = performance.now();
+    function animate(){
+      requestAnimationFrame(animate);
+      const now = performance.now();
+      const dt = Math.min(0.033, (now-last)/1000);
+      last = now;
+
+      if (lavaMat){
+        lavaMat.emissiveIntensity = 1.05 + Math.sin(now*0.008)*0.40;
+      }
+
+      updatePlayer(dt);
+      checkCollects();
+      updateDragon(dt);
+      updateFlames(dt);
+      updateSea(dt);
+      updateDog(dt);
+      updateButterflies(dt);
+      updateButlers(dt);
+      updateParticles(dt);
+
+      // drago ti tocca da vicino
+      if (dragonAlive && dragon && !gameOver && !winState) {
+        const d = player.position.distanceTo(dragon.position);
+        if (d < 2.4) damagePlayer("🐉 Il drago ti ha presa!");
+      }
+
+      // coriandoli dal cielo quando portale attivo
+      if (portalActive && !gameOver) {
+        if (Math.random() < 0.08) {
+          spawnConfettiBurst(player.position.x, player.position.y+10, player.position.z, 30);
+        }
+      }
+
+      // se tutte le stelline prese: drago appare
+      if (!dragonAlive && !winState && !gameOver && starsGot >= starsNeed) {
+        spawnDragon();
+      }
+
+      // messaggio kaki
+      const km = nearKakiMessage();
+      if (km) setHud(km);
+
+      updateCamera();
+
+      // MINI MAPPA
+      drawMinimap();
+
+      renderer.render(scene, camera);
+    }
+
+    // ------------------ Resize ------------------
+    addEventListener("resize", () => {
+      camera.aspect = innerWidth/innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // ------------------ Win condition ------------------
+    // se HP del drago va a 0: defeatDragon() apre portale
+    // (già gestito quando usi P)
+
+    // ------------------ Start ------------------
+    setupLevel(1);
+    updateHealthBar();
+    setHud("Inizia a raccogliere stelline!");
+    animate();
+
+  })();
+  </script>
+</body>
+</html>
